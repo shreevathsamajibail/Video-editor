@@ -37,35 +37,45 @@ import { GoogleGenAI, Modality } from "@google/genai";
 let _aiInstances: any[] = [];
 let currentApiIndex = 0;
 
-const getAIClient = (geminiApiKeys: string[]) => {
-  let keys = geminiApiKeys;
-  if (!keys || keys.length === 0) {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('GEMINI_API_KEYS');
-      if (stored) {
-        keys = JSON.parse(stored);
+  // Helper for trying keys sequentially in case of 403 or quota limits
+  const generateContentWithRetry = async (geminiApiKeys: string[], params: any): Promise<any> => {
+    let keys = geminiApiKeys;
+    if (!keys || keys.length === 0) {
+      if (typeof window !== 'undefined') {
+        const stored = localStorage.getItem('GEMINI_API_KEYS');
+        if (stored) {
+          keys = JSON.parse(stored);
+        }
       }
     }
-  }
-  
-  if (!keys || keys.length === 0) {
-    throw new Error("No Gemini API keys found. Please configure them in Settings.");
-  }
-  
-  if (keys.length === 0) {
-    throw new Error("No valid Gemini API keys found.");
-  }
-  
-  // Re-create instances if the keys changed
-  if (_aiInstances.length !== keys.length || !_aiInstances[0]?.apiKey || !keys.includes(_aiInstances[0]?.apiKey)) {
-    _aiInstances = keys.map((key: string) => new GoogleGenAI({ apiKey: key }));
-  }
+    if (!keys || keys.length === 0) {
+      throw new Error("No Gemini API keys found. Please configure them in Settings.");
+    }
 
-  // Rotate through keys
-  const client = _aiInstances[currentApiIndex];
-  currentApiIndex = (currentApiIndex + 1) % _aiInstances.length;
-  return client;
-};
+    if (_aiInstances.length !== keys.length || !_aiInstances[0]?.apiKey || !keys.includes(_aiInstances[0]?.apiKey)) {
+      _aiInstances = keys.map((key: string) => new GoogleGenAI({ apiKey: key }));
+    }
+
+    let lastError = null;
+    let attempts = 0;
+    while (attempts < _aiInstances.length) {
+      const client = _aiInstances[currentApiIndex];
+      currentApiIndex = (currentApiIndex + 1) % _aiInstances.length;
+      attempts++;
+      
+      try {
+        const res = await client.models.generateContent(params);
+        return res;
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`Key failed (attempt ${attempts}), rotating... Error:`, err.message || err);
+        // If it's not a generic retryable error or leaked key, maybe break?
+        // Let's just retry for any error.
+      }
+    }
+    throw lastError || new Error("All API keys failed.");
+  };
+
 
 interface Scene {
   timestamp: number;
@@ -369,7 +379,7 @@ export default function App() {
 
   const generateVoiceover = async (targetScript: string) => {
     setStatus('Synthesizing voice...');
-    const ttsResponse = await getAIClient(apiKeys).models.generateContent({
+    const ttsResponse = await generateContentWithRetry(apiKeys, {
       model: "gemini-3.1-flash-tts-preview",
       contents: [{ parts: [{ text: targetScript }] }],
       config: {
@@ -704,7 +714,7 @@ export default function App() {
       const audioDuration = await generateVoiceover(textToUse);
       setStatus('Planning story based on audio duration...');
       
-      const planResponse = await getAIClient().models.generateContent({
+      const planResponse = await generateContentWithRetry(apiKeys, {
         model: "gemini-3-flash-preview",
         contents: [{ parts: [{ text: textToUse }] }],
         config: {
