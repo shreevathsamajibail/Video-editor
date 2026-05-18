@@ -100,6 +100,9 @@ export default function App() {
   // Base state
   const [script, setScript] = useState('');
   const [originalScript, setOriginalScript] = useState('');
+  const [apiKeysInputText, setApiKeysInputText] = useState('');
+  const [imageUrlsInputText, setImageUrlsInputText] = useState('');
+  const [saveStatus, setSaveStatus] = useState<{ type: 'idle' | 'saving' | 'success' | 'error', message: string }>({ type: 'idle', message: '' });
   const [selectedVoice, setSelectedVoice] = useState('Charon');
   const [isGenerating, setIsGenerating] = useState(false);
   const [regeneratingIdx, setRegeneratingIdx] = useState<number | null>(null);
@@ -128,7 +131,7 @@ export default function App() {
 
   const uploadToCloud = async () => {
     if (!githubToken || !user || !videoBlob) {
-      alert("Please login via settings first.");
+      setStatus("Please login via settings first.");
       setShowSettings(true);
       return;
     }
@@ -197,8 +200,12 @@ export default function App() {
         const { data: gist } = await octokit.gists.get({ gist_id: settingsGist.id });
         if (gist.files && gist.files['settings.json'] && gist.files['settings.json'].content) {
           const settingsObj = JSON.parse(gist.files['settings.json'].content);
-          setApiKeys(settingsObj.geminiApiKeys || []);
-          setImageUrls(settingsObj.imageWorkerUrls || []);
+          const keysArray = settingsObj.geminiApiKeys || [];
+          const urlsArray = settingsObj.imageWorkerUrls || [];
+          setApiKeys(keysArray);
+          setImageUrls(urlsArray);
+          setApiKeysInputText(keysArray.join(', '));
+          setImageUrlsInputText(urlsArray.join(', '));
         }
       }
 
@@ -244,7 +251,7 @@ export default function App() {
     try {
       await fetchUserData(githubTokenInput);
     } catch(e) {
-      alert("Invalid GitHub Token or Missing Scopes");
+      setSaveStatus({ type: 'error', message: "Invalid GitHub Token or Missing Scopes" });
       setIsAuthLoading(false);
     }
   };
@@ -255,6 +262,9 @@ export default function App() {
     setUser(null);
     setApiKeys([]);
     setImageUrls([]);
+    setApiKeysInputText('');
+    setImageUrlsInputText('');
+    setSaveStatus({ type: 'idle', message: '' });
     setDbProjects([]);
   };
 
@@ -1675,8 +1685,8 @@ export default function App() {
                       <div className="space-y-2">
                         <label className="text-xs text-zinc-500 font-bold uppercase block">Gemini API Keys (comma separated)</label>
                         <textarea 
-                          value={apiKeys.join(', ')}
-                          onChange={(e) => setApiKeys(e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
+                          value={apiKeysInputText}
+                          onChange={(e) => setApiKeysInputText(e.target.value)}
                           className="w-full bg-black border border-zinc-800 rounded-lg p-3 text-sm font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-orange-500 transition-colors"
                           placeholder="AIzaSy... , AIzaSy..."
                           rows={2}
@@ -1686,20 +1696,34 @@ export default function App() {
                       <div className="space-y-2">
                         <label className="text-xs text-zinc-500 font-bold uppercase block">Flux Image Worker URLs (comma separated)</label>
                         <textarea 
-                          value={imageUrls.join(', ')}
-                          onChange={(e) => setImageUrls(e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
+                          value={imageUrlsInputText}
+                          onChange={(e) => setImageUrlsInputText(e.target.value)}
                           className="w-full bg-black border border-zinc-800 rounded-lg p-3 text-sm font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-orange-500 transition-colors"
                           placeholder="https://flux...workers.dev , ..."
                           rows={3}
                         />
                       </div>
                       
+                      {saveStatus.message && (
+                        <div className={`p-3 rounded-lg text-sm flex items-center gap-2 ${saveStatus.type === 'error' ? 'bg-red-500/20 text-red-400' : saveStatus.type === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'}`}>
+                           {saveStatus.type === 'saving' && <Loader2 size={14} className="animate-spin" />}
+                           {saveStatus.message}
+                        </div>
+                      )}
+                      
                       <button 
                         onClick={async () => {
                           if (!githubToken) return;
+                          setSaveStatus({ type: 'saving', message: 'Saving securely to GitHub...' });
                           try {
+                            const newApiKeys = apiKeysInputText.split(',').map(s => s.trim()).filter(Boolean);
+                            const newImageUrls = imageUrlsInputText.split(',').map(s => s.trim()).filter(Boolean);
+                            
+                            setApiKeys(newApiKeys);
+                            setImageUrls(newImageUrls);
+
                             const octokit = new Octokit({ auth: githubToken });
-                            const settingsObj = JSON.stringify({ geminiApiKeys: apiKeys, imageWorkerUrls: imageUrls }, null, 2);
+                            const settingsObj = JSON.stringify({ geminiApiKeys: newApiKeys, imageWorkerUrls: newImageUrls }, null, 2);
                             
                             const { data: gists } = await octokit.gists.list();
                             const settingsGist = gists.find(g => g.description === 'AI Studio Video Settings');
@@ -1717,12 +1741,14 @@ export default function App() {
                                  files: { 'settings.json': { content: settingsObj } }
                                });
                             }
-                            alert('Settings saved securely to your GitHub Gists!');
+                            setSaveStatus({ type: 'success', message: 'Settings saved successfully to GitHub Gists!' });
+                            setTimeout(() => setSaveStatus({ type: 'idle', message: '' }), 5000);
                           } catch(e: any) {
-                            alert('Failed to save to GitHub: ' + e.message);
+                            setSaveStatus({ type: 'error', message: 'Failed to save to GitHub: ' + e.message });
                           }
                         }}
-                        className="w-full bg-orange-500 hover:bg-orange-600 text-black font-bold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
+                        disabled={saveStatus.type === 'saving'}
+                        className="w-full bg-orange-500 hover:bg-orange-600 text-black font-bold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                       >
                          Save Configuration
                       </button>
@@ -1773,7 +1799,7 @@ export default function App() {
                                       
                                       setDbProjects(prev => prev.filter(x => x.id !== p.id));
                                    } catch(err: any) {
-                                      alert("Delete failed: " + err.message);
+                                      setSaveStatus({ type: 'error', message: "Delete failed: " + err.message });
                                    }
                                  }}
                                  className="text-red-500 opacity-0 group-hover:opacity-100 p-1 hover:bg-red-500/10 rounded transition-all"
