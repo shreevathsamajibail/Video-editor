@@ -82,6 +82,16 @@ interface Scene {
   prompt: string;
   text: string;
   imageUrl?: string;
+  blob?: Blob;
+}
+
+interface Project {
+  id: string;
+  userId: string;
+  script: string;
+  videoUrl?: string; // e.g. from GitHub Release
+  createdAt: Date;
+  status: 'rendering' | 'ready';
 }
 
 interface CinematicParticle {
@@ -114,7 +124,9 @@ export default function App() {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [apiKeys, setApiKeys] = useState<string[]>([]);
   const [imageUrls, setImageUrls] = useState<string[]>([]);
-  const [dbProjects, setDbProjects] = useState<any[]>([]);
+  const [dbProjects, setDbProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   // Base state
   const [script, setScript] = useState('');
@@ -259,6 +271,43 @@ jobs:
   const [isFocused, setIsFocused] = useState(false);
   const [showInputBar, setShowInputBar] = useState(true);
 
+  const fetchProjects = async (octokit: Octokit, userLogin: string) => {
+    try {
+      const { data: tree } = await octokit.git.getTree({
+        owner: userLogin,
+        repo: 'ai-studio-video-projects',
+        tree_sha: 'main:projects'
+      });
+      
+      const { data: releases } = await octokit.repos.listReleases({
+        owner: userLogin,
+        repo: 'ai-studio-video-projects',
+        per_page: 50
+      });
+      
+      const projects: Project[] = (tree.tree || []).filter(item => item.type === 'tree').map(item => {
+        const pId = item.path || '';
+        const release = releases.find(r => r.tag_name === `vid-${pId}`);
+        const asset = release?.assets.find(a => a.name === 'output.mp4');
+        
+        return {
+           id: pId,
+           userId: userLogin,
+           script: "Project on GitHub", // Can fetch script.txt if needed
+           videoUrl: asset ? asset.browser_download_url : undefined,
+           createdAt: new Date(parseInt(pId || "0")),
+           status: asset ? 'ready' : 'rendering'
+        };
+      }).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      
+      setDbProjects(projects);
+      return projects;
+    } catch (err) {
+      console.log("No projects yet or error fetching:", err);
+      return [];
+    }
+  };
+
   const fetchUserData = async (token: string) => {
     try {
       const octokit = new Octokit({ auth: token });
@@ -284,30 +333,26 @@ jobs:
       }
 
       // Fetch Projects mapping
-      try {
-        const { data: tree } = await octokit.git.getTree({
-          owner: userData.login,
-          repo: 'ai-studio-video-projects',
-          tree_sha: 'main:projects'
-        });
-        
-        const projects = (tree.tree || []).filter(item => item.type === 'tree').map(item => ({
-             id: item.path,
-             userId: userData.login,
-             script: "Project on GitHub",
-             videoUrl: `https://github.com/${userData.login}/ai-studio-video-projects/tree/main/projects/${item.path}`,
-             createdAt: new Date(parseInt(item.path || "0"))
-        })).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-        setDbProjects(projects);
-      } catch (err) {
-        console.log("No projects yet.");
-      }
+      await fetchProjects(octokit, userData.login);
     } catch (e) {
       console.error(e);
     } finally {
       setIsAuthLoading(false);
     }
   };
+
+  useEffect(() => {
+    let interval: any;
+    if (githubToken && user) {
+       interval = setInterval(() => {
+          if (dbProjects.some(p => p.status === 'rendering')) {
+             const o = new Octokit({ auth: githubToken });
+             fetchProjects(o, user.login);
+          }
+       }, 15000); // Check every 15s if we have rendering projects
+    }
+    return () => clearInterval(interval);
+  }, [githubToken, user, dbProjects]);
 
   useEffect(() => {
     // Load local settings first
@@ -901,6 +946,10 @@ jobs:
       await uploadProjectToGitHub(octokit, user.login, timestamp, audioBase64, imagesPayload, timelineText, textToUse);
 
       setStatus('Deployed! Check GitHub Releases for mp4.');
+      
+      const newProjects = await fetchProjects(octokit, user.login);
+      setSelectedProjectId(timestamp);
+      
       setIsGenerating(false);
       setProgress(100);
     } catch (err: any) {
@@ -1281,42 +1330,127 @@ jobs:
   }, [scenes, currentTime, isGenerating]);
 
   return (
-    <div className="h-[100dvh] flex flex-col bg-[#050505] text-zinc-200 font-sans overflow-hidden">
+    <div className="h-[100dvh] flex bg-[#050505] text-zinc-200 font-sans overflow-hidden">
       <audio ref={audioRef} src={audioUrl || undefined} />
 
-      {/* Header Bar */}
-      <header className="shrink-0 h-14 border-b border-zinc-800/50 px-4 sm:px-6 flex items-center justify-between bg-zinc-950 z-50">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 bg-orange-500 rounded flex items-center justify-center shadow-lg shadow-orange-500/20">
-            <Video size={14} className="text-black" />
-          </div>
-          <h1 className="text-[10px] font-bold uppercase tracking-[0.2em] hidden sm:block">Flux <span className="text-orange-500 text-opacity-80">Editor</span></h1>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {isGenerating && (
-             <div className="hidden sm:flex items-center gap-3 w-24">
-              <div className="h-1 w-full bg-zinc-900 rounded-full overflow-hidden">
-                <motion.div className="h-full bg-orange-500" animate={{ width: `${progress}%` }} />
-              </div>
-             </div>
-          )}
-          
-          <div className="text-[10px] font-mono text-zinc-500 bg-zinc-900/50 px-2 py-1 rounded-full border border-zinc-800/50 max-w-[200px] truncate">
-            {status || 'Idle'}
-          </div>
-
-          <button 
-            onClick={() => setShowSettings(!showSettings)}
-            className={`p-1.5 rounded-lg transition-colors relative ${showSettings ? 'bg-orange-500 text-black' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900'}`}
+      {/* Sidebar */}
+      <AnimatePresence>
+        {isSidebarOpen && (
+          <motion.div 
+            initial={{ width: 0, opacity: 0 }}
+            animate={{ width: 260, opacity: 1 }}
+            exit={{ width: 0, opacity: 0 }}
+            className="flex-shrink-0 bg-zinc-950 border-r border-zinc-800/50 flex flex-col h-full z-40 overflow-hidden"
           >
-            <Settings size={16} />
-          </button>
-        </div>
-      </header>
+            <div className="p-3">
+              <button 
+                onClick={() => {
+                  setOriginalScript('');
+                  setScript('');
+                  setScenes([]);
+                  setAudioUrl(null);
+                  setCurrentTime(0);
+                  setIsGenerating(false);
+                  setShowInputBar(true);
+                  setSelectedProjectId(null);
+                }}
+                className="w-full flex justify-between items-center gap-2 bg-transparent hover:bg-zinc-900 border border-zinc-800 text-zinc-300 px-3 py-2 rounded-lg text-sm transition-colors"
+               >
+                 <span className="font-bold">New Video</span>
+                 <PenTool size={14} className="text-orange-500" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto custom-scrollbar px-2 space-y-1">
+               <div className="text-xs font-bold text-zinc-600 px-2 my-2 uppercase tracking-wider">History</div>
+               {dbProjects.length === 0 && (
+                  <div className="text-xs text-zinc-500 px-2">No past generations.</div>
+               )}
+               {dbProjects.map((p) => (
+                  <div key={p.id} className={`w-full text-left bg-transparent ${selectedProjectId === p.id ? 'bg-zinc-900 border-zinc-700' : 'hover:bg-zinc-900 border-transparent'} border p-2 rounded-md transition-colors flex items-center justify-between group cursor-pointer`} onClick={() => {
+                      setSelectedProjectId(p.id);
+                  }}>
+                    <div className="flex flex-col truncate pr-2">
+                       <span className="text-sm text-zinc-300 truncate font-mono">Project {p.id.slice(-6)}</span>
+                       <span className="text-[10px] flex items-center gap-1 mt-1">
+                          {p.status === 'rendering' ? (
+                            <span className="text-orange-500 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> Rendering...</span>
+                          ) : (
+                            <span className="text-green-500 flex items-center gap-1"><Video size={10} /> Ready</span>
+                          )}
+                       </span>
+                    </div>
+                  </div>
+               ))}
+            </div>
 
-      {/* Main Viewport */}
-      <main className="flex-1 flex flex-col items-center justify-center min-h-0 relative p-2 sm:px-4 sm:py-2 gap-2 w-full max-w-2xl mx-auto">
+            <div className="p-3 border-t border-zinc-800/50">
+               <button 
+                 onClick={() => setShowSettings(!showSettings)}
+                 className="flex items-center gap-2 text-zinc-400 hover:text-zinc-200 text-sm w-full p-2 rounded hover:bg-zinc-900 transition-colors"
+               >
+                 <Settings size={16} />
+                 Settings
+               </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Header Bar */}
+        <header className="shrink-0 h-14 border-b border-zinc-800/50 px-4 sm:px-6 flex items-center justify-between bg-zinc-950 z-30">
+          <div className="flex items-center gap-3">
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="text-zinc-400 hover:text-white transition-colors">
+               <Menu size={18} />
+            </button>
+            <div className="w-6 h-6 bg-orange-500 rounded flex items-center justify-center shadow-lg shadow-orange-500/20">
+              <Video size={14} className="text-black" />
+            </div>
+            <h1 className="text-[10px] font-bold uppercase tracking-[0.2em] hidden sm:block">Flux <span className="text-orange-500 text-opacity-80">Editor</span></h1>
+          </div>
+
+          <div className="flex items-center gap-3">
+             {selectedProjectId && dbProjects.find(p => p.id === selectedProjectId) && (
+               dbProjects.find(p => p.id === selectedProjectId)?.status === 'ready' ? (
+                 <button 
+                   onClick={() => {
+                     const url = dbProjects.find(p => p.id === selectedProjectId)?.videoUrl;
+                     if (url) window.open(url, '_blank');
+                   }}
+                   className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-black text-xs font-bold px-3 py-1.5 rounded-lg transition-transform hover:scale-105 shadow-[0_0_10px_rgba(249,115,22,0.3)]"
+                 >
+                   <Download size={14} />
+                   Download MP4
+                 </button>
+               ) : (
+                 <button 
+                   disabled
+                   className="flex items-center gap-2 border border-orange-500/50 text-orange-500 text-xs font-bold px-3 py-1.5 rounded-lg transition-transform opacity-70"
+                 >
+                   <Loader2 size={14} className="animate-spin" />
+                   Rendering on Cloud...
+                 </button>
+               )
+             )}
+
+            {isGenerating && (
+               <div className="hidden sm:flex items-center gap-3 w-24">
+                <div className="h-1 w-full bg-zinc-900 rounded-full overflow-hidden">
+                  <motion.div className="h-full bg-orange-500" animate={{ width: `${progress}%` }} />
+                </div>
+               </div>
+            )}
+            
+            <div className="text-[10px] font-mono text-zinc-500 bg-zinc-900/50 px-2 py-1 rounded-full border border-zinc-800/50 max-w-[200px] truncate">
+              {status || 'Idle'}
+            </div>
+          </div>
+        </header>
+
+        {/* Main Viewport */}
+        <main className="flex-1 flex flex-col items-center justify-center min-h-0 relative p-2 sm:px-4 sm:py-2 gap-2 w-full max-w-2xl mx-auto">
+
         
         <div className="relative flex-1 w-full min-h-0 bg-black border border-white/10 rounded-xl overflow-hidden shadow-2xl flex items-center justify-center group/player">
             <canvas 
@@ -1743,64 +1877,6 @@ jobs:
                          Save Configuration
                       </button>
                     </div>
-
-                    <div className="space-y-4 pt-4 border-t border-zinc-800">
-                      <div className="flex items-center justify-between">
-                         <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest">Saved Projects</h3>
-                         <span className="text-xs bg-zinc-800 px-2 py-0.5 rounded-full text-zinc-400">{dbProjects.length} items</span>
-                      </div>
-                      
-                      {dbProjects.length === 0 ? (
-                        <div className="text-center p-6 border border-zinc-800 border-dashed rounded-xl text-sm text-zinc-500">
-                          No projects uploaded yet.
-                        </div>
-                      ) : (
-                        <div className="space-y-2 max-h-48 overflow-y-auto custom-scrollbar pr-1">
-                          {dbProjects.map((p, idx) => (
-                            <div key={p.id} className="bg-zinc-950 border border-zinc-800 p-3 rounded-lg flex justify-between items-center group cursor-pointer hover:border-orange-500/50 transition-colors" onClick={() => window.open(p.videoUrl, '_blank')}>
-                               <div className="flex flex-col overflow-hidden">
-                                 <span className="text-sm text-zinc-300 truncate font-mono">Project {idx + 1}</span>
-                                 <span className="text-xs text-zinc-600">{new Date(p.createdAt || Date.now()).toLocaleDateString()}</span>
-                               </div>
-                               <button 
-                                 onClick={async (e) => {
-                                   e.stopPropagation();
-                                   if (!githubToken) return;
-                                   try {
-                                      const octokit = new Octokit({ auth: githubToken });
-                                      
-                                      // Get Tree
-                                      const { data: ref } = await octokit.git.getRef({ owner: user.login, repo: 'ai-studio-video-projects', ref: 'heads/main' });
-                                      const { data: commit } = await octokit.git.getCommit({ owner: user.login, repo: 'ai-studio-video-projects', commit_sha: ref.object.sha });
-                                      const { data: tree } = await octokit.git.getTree({ owner: user.login, repo: 'ai-studio-video-projects', tree_sha: commit.tree.sha, recursive: "1" });
-                                      
-                                      const filesToDelete = tree.tree.filter(t => t.path && t.path.startsWith(`projects/${p.id}/`));
-                                      
-                                      // Deleting from repo easily is easiest via individual file deletions or git tree updates
-                                      for (const file of filesToDelete) {
-                                          await octokit.repos.deleteFile({
-                                            owner: user.login,
-                                            repo: 'ai-studio-video-projects',
-                                            path: file.path as string,
-                                            message: `Delete project ${p.id}`,
-                                            sha: file.sha as string
-                                          });
-                                      }
-                                      
-                                      setDbProjects(prev => prev.filter(x => x.id !== p.id));
-                                   } catch(err: any) {
-                                      setSaveStatus({ type: 'error', message: "Delete failed: " + err.message });
-                                   }
-                                 }}
-                                 className="text-red-500 opacity-0 group-hover:opacity-100 p-1 hover:bg-red-500/10 rounded transition-all"
-                               >
-                                 ✕
-                               </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
                   </div>
                 )}
               </div>
@@ -1808,6 +1884,7 @@ jobs:
           </motion.div>
         )}
       </AnimatePresence>
+      </div>
     </div>
   );
 }
