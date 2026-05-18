@@ -40,6 +40,15 @@ let currentApiIndex = 0;
 const getAIClient = (geminiApiKeys: string[]) => {
   let keys = geminiApiKeys;
   if (!keys || keys.length === 0) {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('GEMINI_API_KEYS');
+      if (stored) {
+        keys = JSON.parse(stored);
+      }
+    }
+  }
+  
+  if (!keys || keys.length === 0) {
     throw new Error("No Gemini API keys found. Please configure them in Settings.");
   }
   
@@ -131,7 +140,7 @@ export default function App() {
 
   const uploadToCloud = async () => {
     if (!githubToken || !user || !videoBlob) {
-      setStatus("Please login via settings first.");
+      setError("Please login via GitHub in Settings first to upload to cloud.");
       setShowSettings(true);
       return;
     }
@@ -236,6 +245,23 @@ export default function App() {
   };
 
   useEffect(() => {
+    // Load local settings first
+    const localKeys = localStorage.getItem('GEMINI_API_KEYS');
+    if (localKeys) {
+      try {
+        const parsed = JSON.parse(localKeys);
+        setApiKeys(parsed);
+        setApiKeysInputText(parsed.join(', '));
+      } catch(e) {}
+    }
+    
+    const localUrls = localStorage.getItem('IMAGE_WORKER_URLS');
+    if (localUrls) {
+      const urlsArray = localUrls.split(',').filter(Boolean);
+      setImageUrls(urlsArray);
+      setImageUrlsInputText(urlsArray.join(', '));
+    }
+
     const storedToken = localStorage.getItem('GITHUB_TOKEN');
     if (storedToken) {
       fetchUserData(storedToken);
@@ -1713,8 +1739,7 @@ export default function App() {
                       
                       <button 
                         onClick={async () => {
-                          if (!githubToken) return;
-                          setSaveStatus({ type: 'saving', message: 'Saving securely to GitHub...' });
+                          setSaveStatus({ type: 'saving', message: 'Saving configuration...' });
                           try {
                             const newApiKeys = apiKeysInputText.split(',').map(s => s.trim()).filter(Boolean);
                             const newImageUrls = imageUrlsInputText.split(',').map(s => s.trim()).filter(Boolean);
@@ -1722,29 +1747,38 @@ export default function App() {
                             setApiKeys(newApiKeys);
                             setImageUrls(newImageUrls);
 
-                            const octokit = new Octokit({ auth: githubToken });
-                            const settingsObj = JSON.stringify({ geminiApiKeys: newApiKeys, imageWorkerUrls: newImageUrls }, null, 2);
-                            
-                            const { data: gists } = await octokit.gists.list();
-                            const settingsGist = gists.find(g => g.description === 'AI Studio Video Settings');
-                            
-                            if (settingsGist) {
-                               await octokit.gists.update({
-                                 gist_id: settingsGist.id,
-                                 description: 'AI Studio Video Settings',
-                                 files: { 'settings.json': { content: settingsObj } }
-                               });
-                            } else {
-                               await octokit.gists.create({
-                                 description: 'AI Studio Video Settings',
-                                 public: false,
-                                 files: { 'settings.json': { content: settingsObj } }
-                               });
+                            localStorage.setItem('GEMINI_API_KEYS', JSON.stringify(newApiKeys));
+                            if (newImageUrls.length > 0) {
+                              localStorage.setItem('IMAGE_WORKER_URLS', newImageUrls.join(','));
                             }
-                            setSaveStatus({ type: 'success', message: 'Settings saved successfully to GitHub Gists!' });
+
+                            if (githubToken) {
+                              const octokit = new Octokit({ auth: githubToken });
+                              const settingsObj = JSON.stringify({ geminiApiKeys: newApiKeys, imageWorkerUrls: newImageUrls }, null, 2);
+                              
+                              const { data: gists } = await octokit.gists.list();
+                              const settingsGist = gists.find(g => g.description === 'AI Studio Video Settings');
+                              
+                              if (settingsGist) {
+                                 await octokit.gists.update({
+                                   gist_id: settingsGist.id,
+                                   description: 'AI Studio Video Settings',
+                                   files: { 'settings.json': { content: settingsObj } }
+                                 });
+                              } else {
+                                 await octokit.gists.create({
+                                   description: 'AI Studio Video Settings',
+                                   public: false,
+                                   files: { 'settings.json': { content: settingsObj } }
+                                 });
+                              }
+                              setSaveStatus({ type: 'success', message: 'Settings saved successfully locally and to GitHub Gists!' });
+                            } else {
+                              setSaveStatus({ type: 'success', message: 'Settings saved successfully locally.' });
+                            }
                             setTimeout(() => setSaveStatus({ type: 'idle', message: '' }), 5000);
                           } catch(e: any) {
-                            setSaveStatus({ type: 'error', message: 'Failed to save to GitHub: ' + e.message });
+                            setSaveStatus({ type: 'error', message: 'Failed to save configuration: ' + e.message });
                           }
                         }}
                         disabled={saveStatus.type === 'saving'}
