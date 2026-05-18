@@ -33,25 +33,23 @@ if (typeof document !== 'undefined') {
   document.head.appendChild(link);
 }
 
-let _aiInstance: any = null;
+let _aiInstances: any[] = [];
+let currentApiIndex = 0;
 
 const getAIClient = () => {
-  if (_aiInstance) return _aiInstance;
-  
-  let key = process.env.GEMINI_API_KEY;
-  if (!key || key === 'undefined' || key === 'null') {
-    // Try local storage
+  let keysString = process.env.GEMINI_API_KEY;
+  if (!keysString || keysString === 'undefined' || keysString === 'null') {
     if (typeof window !== 'undefined') {
-      key = localStorage.getItem('GEMINI_API_KEY') || '';
+      keysString = localStorage.getItem('GEMINI_API_KEY') || '';
     }
   }
   
-  if (!key) {
+  if (!keysString) {
     if (typeof window !== 'undefined') {
-      const userKey = window.prompt("Please enter your Gemini API Key. It will be saved in your browser locally.");
+      const userKey = window.prompt("Please enter your Gemini API Key(s) (comma separated). It will be saved locally.");
       if (userKey) {
         localStorage.setItem('GEMINI_API_KEY', userKey);
-        key = userKey;
+        keysString = userKey;
       } else {
         throw new Error("Gemini API Key is required.");
       }
@@ -60,8 +58,20 @@ const getAIClient = () => {
     }
   }
 
-  _aiInstance = new GoogleGenAI({ apiKey: key });
-  return _aiInstance;
+  const keys = keysString.split(',').map((k: string) => k.trim()).filter((k: string) => k);
+  if (keys.length === 0) {
+    throw new Error("No valid Gemini API keys found.");
+  }
+  
+  // Create an instance for each key if we haven't already
+  if (_aiInstances.length !== keys.length) {
+    _aiInstances = keys.map((key: string) => new GoogleGenAI({ apiKey: key }));
+  }
+
+  // Rotate through keys
+  const client = _aiInstances[currentApiIndex];
+  currentApiIndex = (currentApiIndex + 1) % _aiInstances.length;
+  return client;
 };
 
 interface Scene {
@@ -368,16 +378,35 @@ export default function App() {
   };
 
   const generateImageFromProviders = async (prompt: string): Promise<Blob> => {
-    const workerUrls = [
+    let workerUrlsString = process.env.IMAGE_WORKER_URLS;
+    if (!workerUrlsString || workerUrlsString === 'undefined' || workerUrlsString === 'null') {
+      if (typeof window !== 'undefined') {
+        workerUrlsString = localStorage.getItem('IMAGE_WORKER_URLS') || '';
+      }
+    }
+    
+    // Default fallback URLs if none provided
+    const defaultUrls = [
       "https://flux1.shreevathsa2k27.workers.dev/",
       "https://flux.shreevathsa2k21-4fa.workers.dev/",
       "https://flux.vaishakhaphotos2.workers.dev/",
       "https://flux.vmajibail.workers.dev/"
     ];
 
+    let workerUrls = defaultUrls;
+    if (workerUrlsString) {
+      const parsedUrls = workerUrlsString.split(',').map(u => u.trim()).filter(u => u);
+      if (parsedUrls.length > 0) {
+        workerUrls = parsedUrls;
+      }
+    }
+
+    // Shuffle the URLs to distribute the load randomly per request
+    const shuffledUrls = [...workerUrls].sort(() => Math.random() - 0.5);
+
     let lastError = null;
 
-    for (const workerUrl of workerUrls) {
+    for (const workerUrl of shuffledUrls) {
       try {
         console.log(`[Flux Proxy Frontend] Trying URL: ${workerUrl}`);
         const response = await fetch(workerUrl.trim(), {
