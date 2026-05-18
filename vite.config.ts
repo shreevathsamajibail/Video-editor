@@ -7,10 +7,6 @@ export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
     plugins: [react(), tailwindcss()],
-    define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(process.env.GEMINI_API_KEY || ''),
-      'process.env.IMAGE_WORKER_URLS': JSON.stringify(process.env.IMAGE_WORKER_URLS || ''),
-    },
     base: '/Video-editor/',
     resolve: {
       alias: {
